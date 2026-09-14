@@ -1,0 +1,522 @@
+import json
+import os
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+from datetime import datetime, timedelta
+
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "todo_data.json")
+
+PRIORITIES = ["Low", "Medium", "High"]
+PRIORITY_COLORS = {"Low": "#4caf50", "Medium": "#ff9800", "High": "#f44336"}
+REMINDER_OPTIONS = {
+    "At due time": 0,
+    "5 minutes before": 5,
+    "15 minutes before": 15,
+    "30 minutes before": 30,
+    "1 hour before": 60,
+    "1 day before": 1440,
+}
+CHECK_INTERVAL_MS = 20000  # how often to scan for due reminders (20s)
+
+
+class Task:
+    def __init__(self, title, priority="Medium", due_date="", due_time="",
+                 remind_before=0, done=False, notified=False, task_id=None,
+                 completed_date="", reason=""):
+        self.id = task_id or datetime.now().strftime("%Y%m%d%H%M%S%f")
+        self.title = title
+        self.priority = priority
+        self.due_date = due_date        # "YYYY-MM-DD" or ""
+        self.due_time = due_time        # "HH:MM" or ""
+        self.remind_before = remind_before  # minutes before due time
+        self.done = done
+        self.notified = notified        # whether the reminder already fired
+        self.completed_date = completed_date  # ISO timestamp set when marked done
+        self.reason = reason            # why the task wasn't/couldn't be completed
+
+    def due_datetime(self):
+        """Return a datetime for this task's due date/time, or None if unset."""
+        if not self.due_date:
+            return None
+        time_str = self.due_time or "23:59"
+        try:
+            return datetime.strptime(f"{self.due_date} {time_str}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            return None
+
+    def reminder_datetime(self):
+        due = self.due_datetime()
+        if due is None:
+            return None
+        return due - timedelta(minutes=self.remind_before)
+
+    def is_overdue(self):
+        due = self.due_datetime()
+        return bool(due and not self.done and due < datetime.now())
+
+    def to_dict(self):
+        return {
+            "id": self.id, "title": self.title, "priority": self.priority,
+            "due_date": self.due_date, "due_time": self.due_time,
+            "remind_before": self.remind_before, "done": self.done,
+            "notified": self.notified, "completed_date": self.completed_date,
+            "reason": self.reason,
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return Task(d["title"], d.get("priority", "Medium"), d.get("due_date", ""),
+                    d.get("due_time", ""), d.get("remind_before", 0),
+                    d.get("done", False), d.get("notified", False), d.get("id"),
+                    d.get("completed_date", ""), d.get("reason", ""))
+
+
+class TodoStore:
+    """Handles loading/saving tasks to a JSON file."""
+
+    def __init__(self, path):
+        self.path = path
+        self.tasks = []
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                self.tasks = [Task.from_dict(d) for d in raw]
+            except (json.JSONDecodeError, OSError):
+                self.tasks = []
+        else:
+            self.tasks = []
+
+    def save(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump([t.to_dict() for t in self.tasks], f, indent=2)
+
+    def add(self, task):
+        self.tasks.append(task)
+        self.save()
+
+    def update(self, task):
+        for i, t in enumerate(self.tasks):
+            if t.id == task.id:
+                self.tasks[i] = task
+                break
+        self.save()
+
+    def delete(self, task_id):
+        self.tasks = [t for t in self.tasks if t.id != task_id]
+        self.save()
+
+    def get(self, task_id):
+        for t in self.tasks:
+            if t.id == task_id:
+                return t
+        return None
+
+
+class TaskDialog(simpledialog.Dialog):
+    """Popup dialog for adding or editing a task."""
+
+    def __init__(self, parent, title="Task", task=None):
+        self.task = task
+        self.result_data = None
+        super().__init__(parent, title)
+
+    def body(self, master):
+        tk.Label(master, text="Title:").grid(row=0, column=0, sticky="w", pady=4)
+        self.title_entry = tk.Entry(master, width=35)
+        self.title_entry.grid(row=0, column=1, pady=4)
+
+        tk.Label(master, text="Priority:").grid(row=1, column=0, sticky="w", pady=4)
+        self.priority_var = tk.StringVar(value="Medium")
+        ttk.Combobox(master, textvariable=self.priority_var, values=PRIORITIES,
+                     state="readonly", width=32).grid(row=1, column=1, pady=4)
+
+        tk.Label(master, text="Due date (YYYY-MM-DD):").grid(row=2, column=0, sticky="w", pady=4)
+        self.due_entry = tk.Entry(master, width=35)
+        self.due_entry.grid(row=2, column=1, pady=4)
+
+        tk.Label(master, text="Due time (HH:MM, optional):").grid(row=3, column=0, sticky="w", pady=4)
+        self.time_entry = tk.Entry(master, width=35)
+        self.time_entry.grid(row=3, column=1, pady=4)
+
+        tk.Label(master, text="Remind me:").grid(row=4, column=0, sticky="w", pady=4)
+        self.remind_var = tk.StringVar(value="At due time")
+        ttk.Combobox(master, textvariable=self.remind_var, values=list(REMINDER_OPTIONS.keys()),
+                     state="readonly", width=32).grid(row=4, column=1, pady=4)
+
+        tk.Label(master, text="Reason if not completed\n(optional):", justify="left").grid(
+            row=5, column=0, sticky="w", pady=4)
+        self.reason_entry = tk.Entry(master, width=35)
+        self.reason_entry.grid(row=5, column=1, pady=4)
+
+        if self.task:
+            self.title_entry.insert(0, self.task.title)
+            self.priority_var.set(self.task.priority)
+            self.due_entry.insert(0, self.task.due_date)
+            self.time_entry.insert(0, self.task.due_time)
+            self.reason_entry.insert(0, self.task.reason)
+            for label, mins in REMINDER_OPTIONS.items():
+                if mins == self.task.remind_before:
+                    self.remind_var.set(label)
+                    break
+
+        return self.title_entry
+
+    def validate(self):
+        title = self.title_entry.get().strip()
+        due = self.due_entry.get().strip()
+        time_str = self.time_entry.get().strip()
+
+        if not title:
+            messagebox.showwarning("Missing title", "Please enter a task title.")
+            return False
+        if due:
+            try:
+                datetime.strptime(due, "%Y-%m-%d")
+            except ValueError:
+                messagebox.showwarning("Invalid date", "Use the format YYYY-MM-DD.")
+                return False
+        if time_str:
+            if not due:
+                messagebox.showwarning("Missing date", "Add a due date to set a due time.")
+                return False
+            try:
+                datetime.strptime(time_str, "%H:%M")
+            except ValueError:
+                messagebox.showwarning("Invalid time", "Use 24-hour format HH:MM (e.g. 14:30).")
+                return False
+        return True
+
+    def apply(self):
+        self.result_data = {
+            "title": self.title_entry.get().strip(),
+            "priority": self.priority_var.get(),
+            "due_date": self.due_entry.get().strip(),
+            "due_time": self.time_entry.get().strip(),
+            "remind_before": REMINDER_OPTIONS[self.remind_var.get()],
+            "reason": self.reason_entry.get().strip(),
+        }
+
+
+class TodoApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("To-Do List")
+        self.geometry("600x520")
+        self.minsize(500, 420)
+
+        self.store = TodoStore(DATA_FILE)
+        self.filter_var = tk.StringVar(value="All")
+        self.search_var = tk.StringVar()
+
+        self._build_ui()
+        self.refresh_list()
+        # Reset stale "notified" flags for tasks whose due time changed into the future,
+        # then start the periodic reminder/overdue checker.
+        self.after(1000, self.check_reminders)
+
+    # ---------- UI construction ----------
+    def _build_ui(self):
+        top = tk.Frame(self, padx=10, pady=10)
+        top.pack(fill="x")
+
+        tk.Button(top, text="+ Add Task", command=self.add_task, bg="#2196f3",
+                  fg="white", relief="flat", padx=10, pady=4).pack(side="left")
+
+        tk.Button(top, text="History", command=self.show_history, bg="#616161",
+                  fg="white", relief="flat", padx=10, pady=4).pack(side="left", padx=(8, 0))
+
+        tk.Label(top, text="Filter:").pack(side="left", padx=(15, 4))
+        filter_menu = ttk.Combobox(top, textvariable=self.filter_var,
+                                    values=["All", "Active", "Completed", "Overdue"],
+                                    state="readonly", width=10)
+        filter_menu.pack(side="left")
+        filter_menu.bind("<<ComboboxSelected>>", lambda e: self.refresh_list())
+
+        search_entry = tk.Entry(top, textvariable=self.search_var, width=18)
+        search_entry.pack(side="right")
+        search_entry.bind("<KeyRelease>", lambda e: self.refresh_list())
+        tk.Label(top, text="Search:").pack(side="right", padx=(0, 4))
+
+        # Task list area
+        list_frame = tk.Frame(self)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self.canvas = tk.Canvas(list_frame, highlightthickness=0)
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=self.canvas.yview)
+        self.list_container = tk.Frame(self.canvas)
+
+        self.list_container.bind(
+            "<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.canvas.create_window((0, 0), window=self.list_container, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Status bar
+        self.status_var = tk.StringVar()
+        tk.Label(self, textvariable=self.status_var, anchor="w", padx=10,
+                 fg="#555").pack(fill="x")
+
+    # ---------- Task operations ----------
+    def add_task(self):
+        dialog = TaskDialog(self, "Add Task")
+        if dialog.result_data:
+            task = Task(**dialog.result_data)
+            self.store.add(task)
+            self.refresh_list()
+
+    def edit_task(self, task_id):
+        task = self.store.get(task_id)
+        if not task:
+            return
+        dialog = TaskDialog(self, "Edit Task", task=task)
+        if dialog.result_data:
+            task.title = dialog.result_data["title"]
+            task.priority = dialog.result_data["priority"]
+            task.due_date = dialog.result_data["due_date"]
+            task.due_time = dialog.result_data["due_time"]
+            task.remind_before = dialog.result_data["remind_before"]
+            task.reason = dialog.result_data["reason"]
+            task.notified = False  # allow the reminder to fire again for the new schedule
+            self.store.update(task)
+            self.refresh_list()
+
+    def toggle_done(self, task_id):
+        task = self.store.get(task_id)
+        if task:
+            task.done = not task.done
+            if task.done:
+                task.completed_date = datetime.now().isoformat(timespec="minutes")
+                task.reason = ""  # clear any stale "not completed" reason
+            else:
+                task.completed_date = ""
+            self.store.update(task)
+            self.refresh_list()
+
+    def delete_task(self, task_id):
+        task = self.store.get(task_id)
+        if task and messagebox.askyesno("Delete Task", f"Delete '{task.title}'?"):
+            self.store.delete(task_id)
+            self.refresh_list()
+
+    # ---------- Reminders & missed-task detection ----------
+    def check_reminders(self):
+        now = datetime.now()
+        due_now = []
+        for task in self.store.tasks:
+            if task.done or task.notified:
+                continue
+            reminder_at = task.reminder_datetime()
+            if reminder_at and reminder_at <= now:
+                due_now.append(task)
+
+        for task in due_now:
+            task.notified = True
+            self.store.update(task)
+            self._show_reminder_popup(task)
+
+        if due_now:
+            self.refresh_list()  # picks up any newly-overdue styling too
+        else:
+            # Still refresh periodically so overdue highlighting stays current
+            self._refresh_overdue_styling_if_needed()
+
+        self.after(CHECK_INTERVAL_MS, self.check_reminders)
+
+    def _refresh_overdue_styling_if_needed(self):
+        # Cheap re-render so tasks that just crossed their due time get flagged.
+        self.refresh_list()
+
+    def _show_reminder_popup(self, task):
+        self.bell()
+        popup = tk.Toplevel(self)
+        popup.title("Task Reminder")
+        popup.geometry("340x150")
+        popup.resizable(False, False)
+        popup.attributes("-topmost", True)
+
+        due = task.due_datetime()
+        due_str = due.strftime("%b %d, %Y at %I:%M %p") if due else "no due time set"
+
+        tk.Label(popup, text="⏰ Reminder", font=("Segoe UI", 13, "bold"),
+                 fg="#2196f3").pack(pady=(14, 4))
+        tk.Label(popup, text=task.title, font=("Segoe UI", 11), wraplength=300,
+                 justify="center").pack(pady=2)
+        tk.Label(popup, text=f"Due: {due_str}", font=("Segoe UI", 9), fg="#666").pack(pady=2)
+
+        btn_frame = tk.Frame(popup)
+        btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="Dismiss", command=popup.destroy, padx=10).pack(side="left", padx=4)
+        tk.Button(btn_frame, text="Mark done", padx=10,
+                  command=lambda: (self.toggle_done(task.id), popup.destroy())).pack(side="left", padx=4)
+
+    # ---------- History window ----------
+    def show_history(self):
+        win = tk.Toplevel(self)
+        win.title("Task History")
+        win.geometry("520x480")
+
+        notebook = ttk.Notebook(win)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        completed_tab = tk.Frame(notebook)
+        incomplete_tab = tk.Frame(notebook)
+        notebook.add(completed_tab, text="Completed")
+        notebook.add(incomplete_tab, text="Not Completed")
+
+        completed = sorted([t for t in self.store.tasks if t.done],
+                            key=lambda t: t.completed_date, reverse=True)
+        # "Not completed" = anything unfinished with a due date that's already passed,
+        # i.e. tasks that were actually missed rather than just upcoming work.
+        incomplete = sorted([t for t in self.store.tasks if t.is_overdue()],
+                             key=lambda t: t.due_datetime() or datetime.max, reverse=True)
+
+        self._populate_history_tab(completed_tab, completed, kind="completed")
+        self._populate_history_tab(incomplete_tab, incomplete, kind="incomplete")
+
+    def _populate_history_tab(self, parent, tasks, kind):
+        canvas = tk.Canvas(parent, highlightthickness=0)
+        scrollbar = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        container = tk.Frame(canvas)
+        container.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=container, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        if not tasks:
+            empty_text = "No completed tasks yet." if kind == "completed" else "Nothing missed — nice work!"
+            tk.Label(container, text=empty_text, fg="#888", pady=20).pack()
+            return
+
+        for task in tasks:
+            row = tk.Frame(container, pady=6, padx=6, highlightbackground="#ddd", highlightthickness=1)
+            row.pack(fill="x", pady=3, padx=2)
+
+            tk.Label(row, text=task.title, font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x")
+
+            if kind == "completed":
+                when = task.completed_date.replace("T", " ") if task.completed_date else "unknown time"
+                tk.Label(row, text=f"Completed: {when}", fg="#2e7d32", font=("Segoe UI", 8),
+                         anchor="w").pack(fill="x")
+            else:
+                due = task.due_datetime()
+                due_str = due.strftime("%b %d, %Y %I:%M %p") if due else "no due date"
+                tk.Label(row, text=f"Was due: {due_str}", fg="#c62828", font=("Segoe UI", 8),
+                         anchor="w").pack(fill="x")
+                reason_text = task.reason if task.reason else "No reason given yet."
+                reason_lbl = tk.Label(row, text=f"Reason: {reason_text}", fg="#555",
+                                       font=("Segoe UI", 9), anchor="w", wraplength=440, justify="left")
+                reason_lbl.pack(fill="x", pady=(2, 4))
+
+                btn_row = tk.Frame(row)
+                btn_row.pack(fill="x")
+                tk.Button(btn_row, text="Add/Edit Reason", relief="flat", fg="#2196f3",
+                          command=lambda t=task, lbl=reason_lbl: self._prompt_reason(t, lbl)
+                          ).pack(side="left")
+                tk.Button(btn_row, text="Mark done now", relief="flat", fg="#4caf50",
+                          command=lambda t=task: self._complete_from_history(t)
+                          ).pack(side="left", padx=6)
+
+    def _prompt_reason(self, task, reason_label):
+        new_reason = simpledialog.askstring(
+            "Reason for missing task",
+            f"Why wasn't '{task.title}' completed on time?",
+            initialvalue=task.reason, parent=self,
+        )
+        if new_reason is not None:
+            task.reason = new_reason.strip()
+            self.store.update(task)
+            reason_label.config(text=f"Reason: {task.reason if task.reason else 'No reason given yet.'}")
+
+    def _complete_from_history(self, task):
+        self.toggle_done(task.id)
+        messagebox.showinfo("Marked done", f"'{task.title}' has been marked complete.")
+
+    # ---------- Rendering ----------
+    def refresh_list(self):
+        for widget in self.list_container.winfo_children():
+            widget.destroy()
+
+        tasks = self.store.tasks
+        status = self.filter_var.get()
+        if status == "Active":
+            tasks = [t for t in tasks if not t.done]
+        elif status == "Completed":
+            tasks = [t for t in tasks if t.done]
+        elif status == "Overdue":
+            tasks = [t for t in tasks if t.is_overdue()]
+
+        query = self.search_var.get().strip().lower()
+        if query:
+            tasks = [t for t in tasks if query in t.title.lower()]
+
+        # Sort: overdue first, then incomplete, then by priority, then due date/time
+        priority_rank = {"High": 0, "Medium": 1, "Low": 2}
+
+        def sort_key(t):
+            due = t.due_datetime()
+            due_sort = due if due else datetime.max
+            return (not t.is_overdue(), t.done, priority_rank.get(t.priority, 1), due_sort)
+
+        tasks.sort(key=sort_key)
+
+        if not tasks:
+            tk.Label(self.list_container, text="No tasks to show.", fg="#888",
+                     pady=20).pack()
+        else:
+            for task in tasks:
+                self._render_task_row(task)
+
+        total = len(self.store.tasks)
+        done = len([t for t in self.store.tasks if t.done])
+        overdue = len([t for t in self.store.tasks if t.is_overdue()])
+        status_text = f"{done}/{total} tasks completed"
+        if overdue:
+            status_text += f"   •   {overdue} overdue"
+        self.status_var.set(status_text)
+
+    def _render_task_row(self, task):
+        overdue = task.is_overdue()
+        row_bg = "#fdecea" if overdue else self.cget("bg")
+        row = tk.Frame(self.list_container, pady=4, padx=4, bg=row_bg,
+                        highlightbackground="#f44336" if overdue else row_bg,
+                        highlightthickness=1 if overdue else 0)
+        row.pack(fill="x", pady=2)
+
+        var = tk.BooleanVar(value=task.done)
+        chk = tk.Checkbutton(row, variable=var, command=lambda: self.toggle_done(task.id), bg=row_bg)
+        chk.pack(side="left")
+
+        text_color = "#888" if task.done else ("#c62828" if overdue else "#000")
+        font_style = ("Segoe UI", 10, "overstrike") if task.done else ("Segoe UI", 10, "bold" if overdue else "normal")
+        title_lbl = tk.Label(row, text=task.title, fg=text_color, font=font_style, anchor="w", bg=row_bg)
+        title_lbl.pack(side="left", fill="x", expand=True, padx=6)
+
+        if overdue:
+            tk.Label(row, text="OVERDUE", fg="white", bg="#f44336",
+                     font=("Segoe UI", 8, "bold"), padx=5, pady=1).pack(side="left", padx=3)
+
+        due = task.due_datetime()
+        if due:
+            due_label = due.strftime("%b %d") + (f" {due.strftime('%I:%M %p')}" if task.due_time else "")
+            tk.Label(row, text=due_label, fg="#666", font=("Segoe UI", 8), bg=row_bg).pack(side="left", padx=4)
+
+        tk.Label(row, text=task.priority, fg="white", bg=PRIORITY_COLORS.get(task.priority, "#999"),
+                 font=("Segoe UI", 8, "bold"), padx=6, pady=1).pack(side="left", padx=4)
+
+        tk.Button(row, text="Edit", command=lambda: self.edit_task(task.id),
+                  relief="flat", fg="#2196f3", bg=row_bg).pack(side="left", padx=2)
+        tk.Button(row, text="Delete", command=lambda: self.delete_task(task.id),
+                  relief="flat", fg="#f44336", bg=row_bg).pack(side="left", padx=2)
+
+
+if __name__ == "__main__":
+    app = TodoApp()
+    app.mainloop()
