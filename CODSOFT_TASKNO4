@@ -1,0 +1,236 @@
+import random
+import tkinter as tk
+from tkinter import font as tkfont
+
+CHOICES = ["rock", "paper", "scissors"]
+EMOJI = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
+BEATS = {
+    "rock": "scissors",     # rock beats scissors
+    "scissors": "paper",    # scissors beat paper
+    "paper": "rock",        # paper beats rock
+}
+
+BG = "#2A363B"
+CARD_BG = "#374750"
+ACCENT = "#FF847C"
+ACCENT_ACTIVE = "#E84A5F"
+WIN_COLOR = "#99B898"
+LOSE_COLOR = "#E84A5F"
+TIE_COLOR = "#FECEA8"
+TEXT_LIGHT = "#FDF6EF"
+TEXT_MUTED = "#A9BDB4"
+
+# A dedicated random generator (seeded from the OS) purely for the computer's
+# picks, so its choice is always a fair, uniform 1/3-1/3-1/3 draw each round.
+_computer_rng = random.SystemRandom()
+
+
+class RPSApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Rock · Paper · Scissors")
+        self.geometry("460x600")
+        self.minsize(420, 560)
+        self.configure(bg=BG)
+
+        self.score = {"user": 0, "computer": 0, "tie": 0}
+        self.match_length = None   # 3 or 5, chosen on the setup screen
+        self.round_number = 0
+        self.match_over = False
+
+        self._load_fonts()
+        self._build_setup_screen()
+        self._build_game_screen()
+        self.show_setup_screen()
+
+    # ---------- setup ----------
+    def _load_fonts(self):
+        self.title_font = tkfont.Font(family="Segoe UI", size=20, weight="bold")
+        self.subtitle_font = tkfont.Font(family="Segoe UI", size=11)
+        self.emoji_font = tkfont.Font(family="Segoe UI Emoji", size=48)
+        self.result_font = tkfont.Font(family="Segoe UI", size=16, weight="bold")
+        self.label_font = tkfont.Font(family="Segoe UI", size=10)
+        self.round_font = tkfont.Font(family="Segoe UI", size=10, weight="bold")
+        self.score_font = tkfont.Font(family="Segoe UI", size=12, weight="bold")
+        self.btn_font = tkfont.Font(family="Segoe UI Emoji", size=22)
+        self.format_btn_font = tkfont.Font(family="Segoe UI", size=14, weight="bold")
+
+    # ---------- setup (format selection) screen ----------
+    def _build_setup_screen(self):
+        self.setup_frame = tk.Frame(self, bg=BG)
+
+        tk.Label(self.setup_frame, text="Rock · Paper · Scissors", font=self.title_font,
+                 bg=BG, fg=TEXT_LIGHT).pack(pady=(60, 8))
+        tk.Label(self.setup_frame, text="Choose your match length to begin",
+                 font=self.subtitle_font, bg=BG, fg=TEXT_MUTED).pack(pady=(0, 40))
+
+        for length in (3, 5):
+            card = tk.Frame(self.setup_frame, bg=CARD_BG, padx=20, pady=16)
+            card.pack(pady=10, padx=60, fill="x")
+            tk.Button(
+                card, text=f"Best of {length}", font=self.format_btn_font,
+                bg=ACCENT, fg="white", activebackground=ACCENT_ACTIVE, relief="flat",
+                cursor="hand2", padx=20, pady=10,
+                command=lambda n=length: self.start_match(n),
+            ).pack(fill="x")
+            tk.Label(card, text=f"Play exactly {length} rounds — highest score wins",
+                     font=self.label_font, bg=CARD_BG, fg=TEXT_MUTED).pack(pady=(8, 0))
+
+        tk.Label(self.setup_frame,
+                 text="The computer's move is always a fair, random 1-in-3 pick.",
+                 font=self.label_font, bg=BG, fg=TEXT_MUTED).pack(pady=(40, 0))
+
+    def show_setup_screen(self):
+        self.game_frame.pack_forget()
+        self.setup_frame.pack(fill="both", expand=True)
+
+    def start_match(self, match_length):
+        self.match_length = match_length
+        self.round_number = 0
+        self.match_over = False
+        self.score = {"user": 0, "computer": 0, "tie": 0}
+
+        self.round_lbl.config(text=f"Round 0 of {self.match_length}")
+        self.score_lbl.config(text=self._score_text())
+        self.result_lbl.config(text="Make your move!", fg=TEXT_LIGHT)
+        self.user_emoji_lbl.config(text="❔")
+        self.cpu_emoji_lbl.config(text="❔")
+        self._set_choice_buttons_enabled(True)
+
+        self.setup_frame.pack_forget()
+        self.game_frame.pack(fill="both", expand=True)
+
+    # ---------- game screen ----------
+    def _build_game_screen(self):
+        self.game_frame = tk.Frame(self, bg=BG)
+
+        tk.Label(self.game_frame, text="Rock · Paper · Scissors", font=self.title_font,
+                 bg=BG, fg=TEXT_LIGHT).pack(pady=(20, 2))
+        self.round_lbl = tk.Label(self.game_frame, text="Round 0 of 0", font=self.round_font,
+                                   bg=BG, fg=ACCENT)
+        self.round_lbl.pack(pady=(0, 14))
+
+        # Battle display card
+        card = tk.Frame(self.game_frame, bg=CARD_BG, padx=16, pady=16)
+        card.pack(fill="x", padx=24)
+
+        sides = tk.Frame(card, bg=CARD_BG)
+        sides.pack(fill="x")
+        sides.columnconfigure(0, weight=1)
+        sides.columnconfigure(1, weight=1)
+
+        you_col = tk.Frame(sides, bg=CARD_BG)
+        you_col.grid(row=0, column=0)
+        tk.Label(you_col, text="YOU", font=self.label_font, bg=CARD_BG, fg=TEXT_MUTED).pack()
+        self.user_emoji_lbl = tk.Label(you_col, text="❔", font=self.emoji_font, bg=CARD_BG, fg=TEXT_LIGHT)
+        self.user_emoji_lbl.pack()
+
+        cpu_col = tk.Frame(sides, bg=CARD_BG)
+        cpu_col.grid(row=0, column=1)
+        tk.Label(cpu_col, text="COMPUTER", font=self.label_font, bg=CARD_BG, fg=TEXT_MUTED).pack()
+        self.cpu_emoji_lbl = tk.Label(cpu_col, text="❔", font=self.emoji_font, bg=CARD_BG, fg=TEXT_LIGHT)
+        self.cpu_emoji_lbl.pack()
+
+        self.result_lbl = tk.Label(card, text="Make your move!", font=self.result_font,
+                                    bg=CARD_BG, fg=TEXT_LIGHT, pady=10, wraplength=380, justify="center")
+        self.result_lbl.pack()
+
+        # Choice buttons
+        btn_frame = tk.Frame(self.game_frame, bg=BG)
+        btn_frame.pack(pady=20)
+
+        self.choice_buttons = []
+        for choice in CHOICES:
+            col = tk.Frame(btn_frame, bg=BG)
+            col.pack(side="left", padx=10)
+            b = tk.Button(
+                col, text=EMOJI[choice], font=self.btn_font, width=3, height=1,
+                bg=ACCENT, fg="white", activebackground=ACCENT_ACTIVE, relief="flat",
+                cursor="hand2", command=lambda c=choice: self.play_round(c),
+            )
+            b.pack()
+            tk.Label(col, text=choice.capitalize(), font=self.label_font,
+                     bg=BG, fg=TEXT_MUTED).pack(pady=(4, 0))
+            self.choice_buttons.append(b)
+
+        # Score board
+        score_card = tk.Frame(self.game_frame, bg=CARD_BG, padx=16, pady=12)
+        score_card.pack(fill="x", padx=24, pady=(6, 10))
+
+        self.score_lbl = tk.Label(score_card, text=self._score_text(), font=self.score_font,
+                                   bg=CARD_BG, fg=TEXT_LIGHT, justify="center")
+        self.score_lbl.pack()
+
+        # Controls
+        controls = tk.Frame(self.game_frame, bg=BG)
+        controls.pack(pady=(4, 20))
+        tk.Button(controls, text="New Match", command=self.show_setup_screen,
+                  bg="#4A5C63", fg=TEXT_LIGHT, relief="flat", padx=14, pady=6,
+                  cursor="hand2").pack()
+
+    def _set_choice_buttons_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+        for b in self.choice_buttons:
+            b.config(state=state)
+
+    # ---------- game logic ----------
+    def determine_winner(self, user, computer):
+        if user == computer:
+            return "tie"
+        if BEATS[user] == computer:
+            return "user"
+        return "computer"
+
+    def play_round(self, user_choice):
+        if self.match_over:
+            return
+
+        # Uniform random pick — every round, independent of user_choice and
+        # of any earlier rounds, so results can't be biased toward the user.
+        computer_choice = _computer_rng.choice(CHOICES)
+        result = self.determine_winner(user_choice, computer_choice)
+        self.score["tie" if result == "tie" else result] += 1
+        self.round_number += 1
+
+        self.user_emoji_lbl.config(text=EMOJI[user_choice])
+        self.cpu_emoji_lbl.config(text=EMOJI[computer_choice])
+        self.round_lbl.config(text=f"Round {self.round_number} of {self.match_length}")
+
+        if result == "tie":
+            self.result_lbl.config(text="It's a tie! 🤝", fg=TIE_COLOR)
+        elif result == "user":
+            self.result_lbl.config(text="You win this round! 🎉", fg=WIN_COLOR)
+        else:
+            self.result_lbl.config(text="Computer wins this round. 😞", fg=LOSE_COLOR)
+
+        self.score_lbl.config(text=self._score_text())
+
+        if self.round_number >= self.match_length:
+            self._end_match()
+
+    def _end_match(self):
+        self.match_over = True
+        self._set_choice_buttons_enabled(False)
+
+        you, cpu = self.score["user"], self.score["computer"]
+        if you > cpu:
+            summary = f"🏆 You won the match {you}-{cpu}!"
+            color = WIN_COLOR
+        elif cpu > you:
+            summary = f"💻 Computer won the match {cpu}-{you}."
+            color = LOSE_COLOR
+        else:
+            summary = f"🤝 The match ended in a tie, {you}-{cpu}."
+            color = TIE_COLOR
+
+        self.result_lbl.config(text=f"{summary}\nClick 'New Match' to play again.", fg=color)
+
+    def _score_text(self):
+        return (f"You: {self.score['user']}      "
+                f"Computer: {self.score['computer']}      "
+                f"Ties: {self.score['tie']}")
+
+
+if __name__ == "__main__":
+    app = RPSApp()
+    app.mainloop()
